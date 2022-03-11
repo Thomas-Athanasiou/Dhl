@@ -1,6 +1,6 @@
 <?php
     /**
-     * @author Thomas Athanasiou at Hippiemonkeys
+     * @author Thomas Athanasiou at Hippiemonkeys | @Thomas-Athanasiou
      * @copyright Copyright (c) 2022 Hippiemonkeys (https://hippiemonkeys.com)
      * @package Hippiemonkeys_Dhl
      */
