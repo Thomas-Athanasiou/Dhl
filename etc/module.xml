@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<!--
+/**
+ * @author Thomas Athanasiou at Hippiemonkeys
+ * @copyright Copyright (c) 2022 Hippiemonkeys (https://hippiemonkeys.com)
+ * @package Hippiemonkeys_Dhl
+ */
+-->
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="urn:magento:framework:Module/etc/module.xsd">
+    <module name="Hippiemonkeys_Dhl" setup_version="1.0.0">
+        <sequence>
+            <module name="Magento_Dhl"/>
+        </sequence>
+    </module>
+</config>
