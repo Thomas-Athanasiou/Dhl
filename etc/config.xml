@@ -1,10 +1,8 @@
 <?xml version="1.0"?>
 <!--
-/**
- * @author Thomas Athanasiou at Hippiemonkeys | @Thomas-Athanasiou
- * @copyright Copyright (c) 2022 Hippiemonkeys (https://hippiemonkeys.com)
- * @package Hippiemonkeys_Dhl
- */
+    Thomas Athanasiou at Hippiemonkeys
+    Copyright (c) 2022 Hippiemonkeys (https://hippiemonkeys.com)
+    Hippiemonkeys_Dhl
 -->
 <config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="urn:magento:module:Magento_Store:etc/config.xsd">
     <default>
