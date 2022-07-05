@@ -6,7 +6,7 @@
      *
      * @author Thomas Athanasiou at Hippiemonkeys
      * @link https://github.com/Thomas-Athanasiou
-     * @copyright Copyright (c) 2022 Hippiemonkeys (https://hippiemonkeys.com)
+     * @copyright Copyright (c) 2022 Hippiemonkeys Web Inteligence EE (https://hippiemonkeys.com)
      * @package Hippiemonkeys_Dhl
      */
 
@@ -96,6 +96,8 @@
             $proxyDeferredFactory;
 
         /**
+         * Constructor
+         *
          * @param \Magento\Framework\App\Config\ScopeConfigInterface $scopeConfig
          * @param \Magento\Quote\Model\Quote\Address\RateResult\ErrorFactory $rateErrorFactory
          * @param \Psr\Log\LoggerInterface $logger
