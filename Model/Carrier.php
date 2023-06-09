@@ -1,20 +1,22 @@
 <?php
     /**
-     * Copyright © Magento, Inc. All rights reserved.
-     *
      * @Thomas-Athanasiou
      *
-     * @author Thomas Athanasiou at Hippiemonkeys
+     * @author Thomas Athanasiou {thomas@hippiemonkeys.com}
+     * @link https://hippiemonkeys.com
      * @link https://github.com/Thomas-Athanasiou
-     * @copyright Copyright (c) 2022 Hippiemonkeys Web Inteligence EE (https://hippiemonkeys.com)
+     * @copyright Copyright (c) 2023 Hippiemonkeys Web Intelligence EE All Rights Reserved.
+     * @license http://www.gnu.org/licenses/ GNU General Public License, version 3
      * @package Hippiemonkeys_Dhl
      */
 
+    declare(strict_types=1);
+
     namespace Hippiemonkeys\Dhl\Model;
 
-    use Magento\Dhl\Model\Carrier as ParentCarrier,
-        Magento\Catalog\Model\Product\Type,
-        Magento\Dhl\Model\Validator\XmlValidator,
+    use Psr\Log\LoggerInterface,
+        Magento\Framework\Exception\LocalizedException,
+        Magento\Dhl\Model\Carrier as ParentCarrier,
         Magento\Framework\App\ObjectManager,
         Magento\Framework\App\ProductMetadataInterface,
         Magento\Framework\Async\CallbackDeferred,
@@ -22,15 +24,13 @@
         Magento\Framework\HTTP\AsyncClient\HttpResponseDeferredInterface,
         Magento\Framework\HTTP\AsyncClient\Request,
         Magento\Framework\HTTP\AsyncClientInterface,
-        Magento\Framework\Module\Dir,
         Magento\Framework\Xml\Security,
         Magento\Sales\Model\Order\Shipment,
         Magento\Shipping\Model\Rate\Result,
         Magento\Shipping\Model\Rate\Result\ProxyDeferredFactory,
-
         Magento\Framework\App\Config\ScopeConfigInterface,
+        Magento\Quote\Model\Quote\Address\RateRequest,
         Magento\Quote\Model\Quote\Address\RateResult\ErrorFactory as RateErrorFactory,
-        Psr\Log\LoggerInterface,
         Magento\Shipping\Model\Simplexml\ElementFactory,
         Magento\Shipping\Model\Rate\ResultFactory as RateResultFactory,
         Magento\Quote\Model\Quote\Address\RateResult\MethodFactory as RateMethodFactory,
@@ -45,12 +45,13 @@
         Magento\Shipping\Helper\Carrier as CarrierHelper,
         Magento\Framework\Stdlib\DateTime\DateTime,
         Magento\Framework\Module\Dir\Reader as ConfigReader,
+        Magento\Store\Model\Website,
         Magento\Store\Model\StoreManagerInterface,
         Magento\Framework\Stdlib\StringUtils,
         Magento\Framework\Math\Division as MathDivision,
         Magento\Framework\Filesystem\Directory\ReadFactory,
         Magento\Framework\Stdlib\DateTime as MagentoDateTime,
-        Magento\Framework\HTTP\ZendClientFactory,
+        Magento\Framework\HTTP\LaminasClientFactory,
         Magento\Dhl\Model\Validator\XmlValidator as DhlXmlValidator;
 
     class Carrier
@@ -80,28 +81,15 @@
             SERVICE_PREFIX_SHIPVAL = 'SHIP',
             SERVICE_PREFIX_TRACKING = 'TRCK';
 
-        private
-            /**
-             * Http Client override property
-             *
-             * @inheritdoc
-             */
-            $httpClient,
-
-            /**
-             * Proxy Defered Factory override property
-             *
-             * @inheritdoc
-             */
-            $proxyDeferredFactory;
-
         /**
          * Constructor
+         *
+         * @access public
          *
          * @param \Magento\Framework\App\Config\ScopeConfigInterface $scopeConfig
          * @param \Magento\Quote\Model\Quote\Address\RateResult\ErrorFactory $rateErrorFactory
          * @param \Psr\Log\LoggerInterface $logger
-         * @param Security $xmlSecurity
+         * @param \Magento\Framework\Xml\Security $xmlSecurity
          * @param \Magento\Shipping\Model\Simplexml\ElementFactory $xmlElFactory
          * @param \Magento\Shipping\Model\Rate\ResultFactory $rateFactory
          * @param \Magento\Quote\Model\Quote\Address\RateResult\MethodFactory $rateMethodFactory
@@ -121,12 +109,12 @@
          * @param \Magento\Framework\Math\Division $mathDivision
          * @param \Magento\Framework\Filesystem\Directory\ReadFactory $readFactory
          * @param \Magento\Framework\Stdlib\DateTime $dateTime
-         * @param \Magento\Framework\HTTP\ZendClientFactory $httpClientFactory
+         * @param \Magento\Framework\HTTP\LaminasClientFactory $httpClientFactory
          * @param array $data
          * @param \Magento\Dhl\Model\Validator\XmlValidator|null $xmlValidator
-         * @param ProductMetadataInterface|null $productMetadata
-         * @param AsyncClientInterface|null $httpClient
-         * @param ProxyDeferredFactory|null $proxyDeferredFactory
+         * @param \Magento\Framework\App\ProductMetadataInterface|null $productMetadata
+         * @param \Magento\Framework\HTTP\AsyncClientInterface|null $httpClient
+         * @param \Magento\Shipping\Model\Rate\Result\ProxyDeferredFactory|null $proxyDeferredFactory
          * @SuppressWarnings(PHPMD.ExcessiveParameterList)
          */
         public function __construct(
@@ -153,7 +141,7 @@
             MathDivision $mathDivision,
             ReadFactory $readFactory,
             MagentoDateTime $dateTime,
-            ZendClientFactory $httpClientFactory,
+            LaminasClientFactory $httpClientFactory,
             array $data = [],
             DhlXmlValidator $xmlValidator = null,
             ProductMetadataInterface $productMetadata = null,
@@ -192,13 +180,13 @@
                 $httpClient ,
                 $proxyDeferredFactory
             );
-            $this->httpClient = $httpClient ?? ObjectManager::getInstance()->get(AsyncClientInterface::class);
-            $this->proxyDeferredFactory = $proxyDeferredFactory ?? ObjectManager::getInstance()->get(ProxyDeferredFactory::class);
+            $this->_httpClient = $httpClient ?? ObjectManager::getInstance()->get(AsyncClientInterface::class);
+            $this->_proxyDeferredFactory = $proxyDeferredFactory ?? ObjectManager::getInstance()->get(ProxyDeferredFactory::class);
         }
 
 
         /**
-         * @inheritdoc
+         * {@inheritdoc}
          */
         protected function _getQuotes()
         {
@@ -206,34 +194,36 @@
             /** @var HttpResponseDeferredInterface[][] $deferredResponses */
             $deferredResponses = [];
             $requestXml = $this->_buildQuotesRequestXml();
-            for ($offset = 0; $offset <= self::UNAVAILABLE_DATE_LOOK_FORWARD; $offset++) {
+            for ($offset = 0; $offset <= self::UNAVAILABLE_DATE_LOOK_FORWARD; $offset++)
+            {
                 $date = date(self::REQUEST_DATE_FORMAT, strtotime($this->_getShipDate() . " +{$offset} days"));
                 $this->_setQuotesRequestXmlDate($requestXml, $date);
                 $request = $requestXml->asXML();
                 $responseBody = $this->_getCachedQuotes($request);
 
-                if ($responseBody === null) {
+                if ($responseBody === null)
+                {
                     $deferredResponses[] = [
-                        'deferred' => $this->httpClient->request(
+                        /**
+                         * THOMAS - EDIT - ΑΛΛΑΓΗ ΠΡΟΒΛΗΜΑ ΣΤΟ SANDBOX MODE: ΑΡΧΗ
+                         */
+                        'deferred' => $this->getHttpClient()->request(
                             new Request(
-
-                                /**
-                                 * THOMAS - EDIT - ΑΛΛΑΓΗ ΠΡΟΒΛΗΜΑ ΣΤΟ SANDBOX MODE: ΑΡΧΗ
-                                 */
                                 (string)$this->getGatewayUrl(),
-                                /**
-                                 * THOMAS - EDIT - ΑΛΛΑΓΗ ΠΡΟΒΛΗΜΑ ΣΤΟ SANDBOX MODE: ΤΕΛΟΣ
-                                 */
-
                                 Request::METHOD_POST,
                                 ['Content-Type' => 'application/xml'],
-                                utf8_encode($request)
+                                mb_convert_encoding($request, 'UTF-8')
                             )
                         ),
+                        /**
+                         * THOMAS - EDIT - ΑΛΛΑΓΗ ΠΡΟΒΛΗΜΑ ΣΤΟ SANDBOX MODE: ΤΕΛΟΣ
+                         */
                         'date' => $date,
                         'request' => $request
                     ];
-                } else {
+                }
+                else
+                {
                     $responseBodies[] = [
                         'body' => $responseBody,
                         'date' => $date,
@@ -243,17 +233,22 @@
                 }
             }
 
-            return $this->proxyDeferredFactory->create(
+            return $this->getProxyDeferredFactory()->create(
                 [
                     'deferred' => new CallbackDeferred(
-                        function () use ($deferredResponses, $responseBodies) {
+                        function () use ($deferredResponses, $responseBodies)
+                        {
                             //Loading rates not found in cache
-                            foreach ($deferredResponses as $deferredResponseData) {
+                            foreach ($deferredResponses as $deferredResponseData)
+                            {
                                 $responseResult = null;
-                                try {
+                                try
+                                {
                                     $responseResult = $deferredResponseData['deferred']->get();
-                                } catch (HttpException $exception) {
-                                    $this->_logger->critical($exception);
+                                }
+                                catch (HttpException $exception)
+                                {
+                                    $this->getLogger()->critical($exception);
                                 }
                                 $responseBody = $responseResult ? $responseResult->getBody() : '';
                                 $responseBodies[] = [
@@ -277,7 +272,6 @@
         protected function _shipmentDetails($xml, $rawRequest, $originRegion = '')
         {
             $nodeShipmentDetails = $xml->addChild('ShipmentDetails', '', '');
-            $nodeShipmentDetails->addChild('NumberOfPieces', count($rawRequest->getPackages()));
 
             $nodePieces = $nodeShipmentDetails->addChild('Pieces', '', '');
 
@@ -289,36 +283,44 @@
              * JP (Jumbo Junior Parcel), PA (Parcel), DF (DHL Flyer)
              */
             $i = 0;
+
             /**
              * THOMAS - EDIT - ΠΡΟΣΘΗΚΗ ΤΙΤΛΩΝ ΕΙΔΩΝ ΣΤΟ ΠΕΔΙΟ "CONTENTS": ΑΡΧΗ
              */
             $shipmentContents = [];
+            $stringUtils = $this->getStringUtils();
             /**
              * THOMAS - EDIT - ΠΡΟΣΘΗΚΗ ΤΙΤΛΩΝ ΕΙΔΩΝ ΣΤΟ ΠΕΔΙΟ "CONTENTS": ΤΕΛΟΣ
              */
-            foreach ($rawRequest->getPackages() as $package) {
+            foreach ($rawRequest->getPackages() as $package)
+            {
                 $nodePiece = $nodePieces->addChild('Piece', '', '');
                 $packageType = 'EE';
-                if ($package['params']['container'] == self::DHL_CONTENT_TYPE_NON_DOC) {
+                if ($package['params']['container'] == self::DHL_CONTENT_TYPE_NON_DOC)
+                {
                     $packageType = 'CP';
                 }
                 $nodePiece->addChild('PieceID', ++$i);
                 $nodePiece->addChild('PackageType', $packageType);
                 $nodePiece->addChild('Weight', sprintf('%.3f', $package['params']['weight']));
                 $params = $package['params'];
-                if ($params['width'] && $params['length'] && $params['height']) {
-                    $nodePiece->addChild('Width', round($params['width']));
-                    $nodePiece->addChild('Height', round($params['height']));
-                    $nodePiece->addChild('Depth', round($params['length']));
+
+                if ($params['width'] && $params['length'] && $params['height'])
+                {
+                    $nodePiece->addChild('Width', (string) round((float) $params['width']));
+                    $nodePiece->addChild('Height', (string) round((float) $params['height']));
+                    $nodePiece->addChild('Depth', (string) round((float) $params['length']));
                 }
                 $content = [];
-                foreach ($package['items'] as $item) {
+                foreach ($package['items'] as $item)
+                {
                     $content[] = $item['name'];
                 }
+
                 /**
                  * THOMAS - EDIT - ΠΡΟΣΘΗΚΗ ΤΙΤΛΩΝ ΕΙΔΩΝ ΣΤΟ ΠΕΔΙΟ "CONTENTS": ΑΡΧΗ
                  */
-                $packageContent = $this->string->substr(implode(',', $content), 0, 34);
+                $packageContent = $stringUtils->substr(implode(',', $content), 0, 34);
                 $shipmentContents[] = $packageContent;
                 $nodePiece->addChild('PieceContents', $packageContent);
                 /**
@@ -326,56 +328,66 @@
                  */
             }
 
-            $nodeShipmentDetails->addChild('Weight', sprintf('%.3f', $rawRequest->getPackageWeight()));
             $nodeShipmentDetails->addChild('WeightUnit', substr($this->_getWeightUnit(), 0, 1));
             $nodeShipmentDetails->addChild('GlobalProductCode', $rawRequest->getShippingMethod());
             $nodeShipmentDetails->addChild('LocalProductCode', $rawRequest->getShippingMethod());
-            $nodeShipmentDetails->addChild(
-                'Date',
-                $this->_coreDate->date('Y-m-d', strtotime('now + 1day'))
-            );
+            $nodeShipmentDetails->addChild('Date', $this->getCoreDate()->date('Y-m-d', strtotime('now + 1day')));
+
             /**
              * THOMAS - EDIT - ΠΡΟΣΘΗΚΗ ΤΙΤΛΩΝ ΕΙΔΩΝ ΣΤΟ ΠΕΔΙΟ "CONTENTS": ΑΡΧΗ
              */
-            /* $nodeShipmentDetails->addChild('Contents', 'DHL Package'); */
-            $nodeShipmentDetails->addChild('Contents', $this->string->substr(implode(',', $shipmentContents), 0, 500));
+            /* $nodeShipmentDetails->addChild('Contents', 'DHL Parcel');*/
+            $nodeShipmentDetails->addChild('Contents', $stringUtils->substr(implode(',', $shipmentContents), 0, 500));
             /**
              * THOMAS - EDIT - ΠΡΟΣΘΗΚΗ ΤΙΤΛΩΝ ΕΙΔΩΝ ΣΤΟ ΠΕΔΙΟ "CONTENTS": ΤΕΛΟΣ
              */
-            /**
-             * The DoorTo Element defines the type of delivery service that applies to the shipment.
-             * The valid values are DD (Door to Door), DA (Door to Airport) , AA and DC (Door to
-             * Door non-compliant)
-             */
-            $nodeShipmentDetails->addChild('DoorTo', 'DD');
+
             $nodeShipmentDetails->addChild('DimensionUnit', substr($this->_getDimensionUnit(), 0, 1));
             $contentType = isset($package['params']['container']) ? $package['params']['container'] : '';
             $packageType = $contentType === self::DHL_CONTENT_TYPE_NON_DOC ? 'CP' : 'EE';
             $nodeShipmentDetails->addChild('PackageType', $packageType);
-            if ($this->isDutiable($rawRequest->getOrigCountryId(), $rawRequest->getDestCountryId())) {
+            if ($this->isDutiable($rawRequest->getShipperAddressCountryCode(), $rawRequest->getRecipientAddressCountryCode()))
+            {
                 $nodeShipmentDetails->addChild('IsDutiable', 'Y');
             }
-            $nodeShipmentDetails->addChild(
-                'CurrencyCode',
-                $this->_storeManager->getWebsite($this->_request->getWebsiteId())->getBaseCurrencyCode()
-            );
+
+            /**
+             * THOMAS - EDIT - TYPE ERROR: ΑΡΧΗ
+             */
+            $baseCurrencyCode = 'USD';
+            $requestWebsite = $this->getStoreManager()->getWebsite($this->getRequest()->getWebsiteId());
+            if($requestWebsite instanceof Website)
+            {
+                $baseCurrencyCode = $requestWebsite->getBaseCurrencyCode();
+            }
+            $nodeShipmentDetails->addChild('CurrencyCode', $baseCurrencyCode);
+            /**
+             * THOMAS - EDIT - TYPE ERROR: ΤΕΛΟΣ
+             */
         }
 
-
         /**
-         * @inheritdoc
+         * {@inheritdoc}
          */
         protected function _doRequest()
         {
-            $rawRequest = $this->_request;
+            /**
+             * THOMAS - EDIT - STRING UTILS: ΑΡΧΗ
+             */
+            $stringUtils = $this->getStringUtils();
+            /**
+             * THOMAS - EDIT - STRING UTILS: ΤΕΛΟΣ
+             */
+
+            $rawRequest = $this->getRequest();
 
             $xmlStr = '<?xml version="1.0" encoding="UTF-8"?>' .
                 '<req:ShipmentRequest' .
                 ' xmlns:req="http://www.dhl.com"' .
                 ' xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"' .
-                ' xsi:schemaLocation="http://www.dhl.com ship-val-global-req-6.0.xsd"' .
-                ' schemaVersion="6.0" />';
-            $xml = $this->_xmlElFactory->create(['data' => $xmlStr]);
+                ' xsi:schemaLocation="http://www.dhl.com ship-val-global-req.xsd"' .
+                ' schemaVersion="10.0" />';
+            $xml = $this->getXmlElFactory()->create(['data' => $xmlStr]);
 
             $nodeRequest = $xml->addChild('Request', '', '');
             $nodeServiceHeader = $nodeRequest->addChild('ServiceHeader');
@@ -388,24 +400,29 @@
             $nodeServiceHeader->addChild('SiteID', (string)$this->getConfigData('id'));
             $nodeServiceHeader->addChild('Password', (string)$this->getConfigData('password'));
 
+            $nodeMetaData = $nodeRequest->addChild('MetaData');
+            $nodeMetaData->addChild('SoftwareName', $this->buildSoftwareName());
+            $nodeMetaData->addChild('SoftwareVersion', $this->buildSoftwareVersion());
+
             $originRegion = $this->getCountryParams(
-                $this->_scopeConfig->getValue(
+                $this->getScopeConfig()->getValue(
                     Shipment::XML_PATH_STORE_COUNTRY_ID,
-                    \Magento\Store\Model\ScopeInterface::SCOPE_STORE,
+                    ScopeInterface::SCOPE_STORE,
                     $this->getStore()
                 )
             )->getRegion();
-            if ($originRegion) {
+
+            if ($originRegion)
+            {
                 $xml->addChild('RegionCode', $originRegion, '');
             }
             $xml->addChild('RequestedPickupTime', 'N', '');
-            $xml->addChild('NewShipper', 'N', '');
             $xml->addChild('LanguageCode', 'EN', '');
-            $xml->addChild('PiecesEnabled', 'Y', '');
 
             /** Billing */
             $nodeBilling = $xml->addChild('Billing', '', '');
-            $nodeBilling->addChild('ShipperAccountNumber', (string)$this->getConfigData('account'));
+            $nodeBilling->addChild('ShipperAccountNumber', (string)substr($this->getConfigData('account'), 0, 9));
+
             /**
              * Method of Payment:
              * S (Shipper)
@@ -417,16 +434,21 @@
             /**
              * Shipment bill to account – required if Shipping PaymentType is other than 'S'
              */
-            $nodeBilling->addChild('BillingAccountNumber', (string)$this->getConfigData('account'));
+            $nodeBilling->addChild('BillingAccountNumber', (string)substr($this->getConfigData('account'), 0, 9));
 
             /**
              * THOMAS - EDIT - ΑΛΛΑΓΗ DHL BULLET POINT 4: ΑΡΧΗ
              */
-            $dutyPaymentType = $this->getDutyPaymentType();
-            $nodeBilling->addChild('DutyPaymentType', $dutyPaymentType);
-            if($dutyPaymentType == self::PAYMENT_TYPE_SHIPPER)
+            $isDutiable = $this->isDutiable($rawRequest->getShipperAddressCountryCode(), $rawRequest->getRecipientAddressCountryCode());
+            if($isDutiable)
             {
-                $nodeBilling->addChild('DutyAccountNumber', (string)$this->getConfigData('account'));
+                $dutyPaymentType = $this->getDutyPaymentType();
+                $nodeBilling->addChild('DutyPaymentType', $dutyPaymentType);
+                if($dutyPaymentType == self::PAYMENT_TYPE_SHIPPER)
+                {
+                    $nodeBilling->addChild('DutyAccountNumber', (string)$this->getConfigData('account'));
+                }
+                /* $nodeBilling->addChild('DutyAccountNumber', (string)substr($this->getConfigData('account'), 0, 9));*/
             }
             /**
              * THOMAS - EDIT - ΑΛΛΑΓΗ DHL BULLET POINT 4: ΤΕΛΟΣ
@@ -435,36 +457,52 @@
             /** Receiver */
             $nodeConsignee = $xml->addChild('Consignee', '', '');
 
-            $companyName = $rawRequest->getRecipientContactCompanyName() ? $rawRequest
-                ->getRecipientContactCompanyName() : $rawRequest
-                ->getRecipientContactPersonName();
+            $companyName = $rawRequest->getRecipientContactCompanyName() ? $rawRequest->getRecipientContactCompanyName() : $rawRequest->getRecipientContactPersonName();
 
-            $nodeConsignee->addChild('CompanyName', substr($companyName, 0, 35));
+            $nodeConsignee->addChild('CompanyName', is_string($companyName) ? substr($companyName, 0, 60) : '');
 
             $address = $rawRequest->getRecipientAddressStreet1() . ' ' . $rawRequest->getRecipientAddressStreet2();
-            $address = $this->string->split($address, 35, false, true);
-            if (is_array($address)) {
-                foreach ($address as $addressLine) {
-                    $nodeConsignee->addChild('AddressLine', $addressLine);
+
+            /**
+             * THOMAS - EDIT - STRING UTILS: ΑΡΧΗ
+             */
+            $address = $stringUtils->split($address, 45, false, true);
+            /**
+             * THOMAS - EDIT - STRING UTILS: ΤΕΛΟΣ
+             */
+
+            if (is_array($address))
+            {
+                $addressLineNumber = 1;
+                foreach ($address as $addressLine)
+                {
+                    if ($addressLineNumber > 3)
+                    {
+                        break;
+                    }
+                    $nodeConsignee->addChild('AddressLine'.$addressLineNumber, $addressLine);
+                    $addressLineNumber++;
                 }
-            } else {
-                $nodeConsignee->addChild('AddressLine', $address);
+            }
+            else
+            {
+                $nodeConsignee->addChild('AddressLine1', $address);
             }
 
             $nodeConsignee->addChild('City', $rawRequest->getRecipientAddressCity());
             $recipientAddressStateOrProvinceCode = $rawRequest->getRecipientAddressStateOrProvinceCode();
-            if ($recipientAddressStateOrProvinceCode) {
+            if ($recipientAddressStateOrProvinceCode)
+            {
                 $nodeConsignee->addChild('Division', $recipientAddressStateOrProvinceCode);
             }
             $nodeConsignee->addChild('PostalCode', $rawRequest->getRecipientAddressPostalCode());
             $nodeConsignee->addChild('CountryCode', $rawRequest->getRecipientAddressCountryCode());
-            $nodeConsignee->addChild(
-                'CountryName',
-                $this->getCountryParams($rawRequest->getRecipientAddressCountryCode())->getName()
-            );
+            $nodeConsignee->addChild('CountryName', $this->getCountryParams($rawRequest->getRecipientAddressCountryCode())->getName());
             $nodeContact = $nodeConsignee->addChild('Contact');
-            $nodeContact->addChild('PersonName', substr($rawRequest->getRecipientContactPersonName(), 0, 34));
-            $nodeContact->addChild('PhoneNumber', substr($rawRequest->getRecipientContactPhoneNumber(), 0, 24));
+            $recipientContactPersonName = is_string($rawRequest->getRecipientContactPersonName()) ? substr($rawRequest->getRecipientContactPersonName(), 0, 34) : '';
+            $recipientContactPhoneNumber = is_string($rawRequest->getRecipientContactPhoneNumber()) ? substr($rawRequest->getRecipientContactPhoneNumber(), 0, 24) : '';
+            $nodeContact->addChild('PersonName', $recipientContactPersonName);
+            $nodeContact->addChild('PhoneNumber', $recipientContactPhoneNumber);
 
             /**
              * Commodity
@@ -472,22 +510,36 @@
              * value should lie in between 1 to 9999.This field is mandatory.
              */
             $nodeCommodity = $xml->addChild('Commodity', '', '');
-            $nodeCommodity->addChild('CommodityCode', '1');
+            $nodeCommodity->addChild('CommodityCode', substr('01', 0, 18));
 
             /** Dutiable */
-            if ($this->isDutiable(
-                $rawRequest->getShipperAddressCountryCode(),
-                $rawRequest->getRecipientAddressCountryCode()
-            )) {
+            if($isDutiable)
+            {
                 $nodeDutiable = $xml->addChild('Dutiable', '', '');
                 $nodeDutiable->addChild(
                     'DeclaredValue',
                     sprintf("%.2F", $rawRequest->getOrderShipment()->getOrder()->getSubtotal())
                 );
-                $baseCurrencyCode = $this->_storeManager->getWebsite($rawRequest->getWebsiteId())->getBaseCurrencyCode();
-                $nodeDutiable->addChild('DeclaredCurrency', $baseCurrencyCode);
-            }
 
+                /**
+                 * THOMAS - EDIT - TYPE ERROR: ΑΡΧΗ
+                 */
+                $baseCurrencyCode = 'USD';
+                $requestWebsite = $this->getStoreManager()->getWebsite($rawRequest->getWebsiteId());
+                if($requestWebsite instanceof Website)
+                {
+                    $baseCurrencyCode = $requestWebsite->getBaseCurrencyCode();
+                }
+                $nodeDutiable->addChild('DeclaredCurrency', $baseCurrencyCode);
+                /**
+                 * THOMAS - EDIT - TYPE ERROR: ΤΕΛΟΣ
+                 */
+
+                $nodeDutiable->addChild('TermsOfTrade', 'DAP');
+
+                /** Export Declaration */
+                $this->addExportDeclaration($xml, $rawRequest);
+            }
             /**
              * Reference
              * This element identifies the reference information. It is an optional field in the
@@ -502,47 +554,68 @@
 
             /** Shipper */
             $nodeShipper = $xml->addChild('Shipper', '', '');
-            $nodeShipper->addChild('ShipperID', (string)$this->getConfigData('account'));
+            $nodeShipper->addChild('ShipperID', (string)substr($this->getConfigData('account'), 0, 9));
             $nodeShipper->addChild('CompanyName', $rawRequest->getShipperContactCompanyName());
-            $nodeShipper->addChild('RegisteredAccount', (string)$this->getConfigData('account'));
+            $nodeShipper->addChild('RegisteredAccount', (string)substr($this->getConfigData('account'), 0, 9));
 
             $address = $rawRequest->getShipperAddressStreet1() . ' ' . $rawRequest->getShipperAddressStreet2();
-            $address = $this->string->split($address, 35, false, true);
-            if (is_array($address)) {
-                foreach ($address as $addressLine) {
-                    $nodeShipper->addChild('AddressLine', $addressLine);
+
+            /**
+             * THOMAS - EDIT - STRING UTILS: ΑΡΧΗ
+             */
+            $address = $stringUtils->split($address, 45, false, true);
+            /**
+             * THOMAS - EDIT - STRING UTILS: ΤΕΛΟΣ
+             */
+
+            if (is_array($address))
+            {
+                $addressLineNumber = 1;
+                foreach ($address as $addressLine)
+                {
+                    if ($addressLineNumber > 3)
+                    {
+                        break;
+                    }
+                    $nodeShipper->addChild('AddressLine'.$addressLineNumber, $addressLine);
+                    $addressLineNumber++;
                 }
-            } else {
-                $nodeShipper->addChild('AddressLine', $address);
+            }
+            else
+            {
+                $nodeShipper->addChild('AddressLine1', $address);
             }
 
             $nodeShipper->addChild('City', $rawRequest->getShipperAddressCity());
             $shipperAddressStateOrProvinceCode = $rawRequest->getShipperAddressStateOrProvinceCode();
-            if ($shipperAddressStateOrProvinceCode) {
+            if ($shipperAddressStateOrProvinceCode)
+            {
                 $nodeShipper->addChild('Division', $shipperAddressStateOrProvinceCode);
             }
             $nodeShipper->addChild('PostalCode', $rawRequest->getShipperAddressPostalCode());
             $nodeShipper->addChild('CountryCode', $rawRequest->getShipperAddressCountryCode());
-            $nodeShipper->addChild(
-                'CountryName',
-                $this->getCountryParams($rawRequest->getShipperAddressCountryCode())->getName()
-            );
+            $nodeShipper->addChild('CountryName', $this->getCountryParams($rawRequest->getShipperAddressCountryCode())->getName());
             $nodeContact = $nodeShipper->addChild('Contact', '', '');
-            $nodeContact->addChild('PersonName', substr($rawRequest->getShipperContactPersonName(), 0, 34));
-            $nodeContact->addChild('PhoneNumber', substr($rawRequest->getShipperContactPhoneNumber(), 0, 24));
+            $shipperContactPersonName = is_string($rawRequest->getShipperContactPersonName()) ? substr($rawRequest->getShipperContactPersonName(), 0, 34) : '';
+            $shipperContactPhoneNumber = is_string($rawRequest->getShipperContactPhoneNumber()) ? substr($rawRequest->getShipperContactPhoneNumber(), 0, 24) : '';
+            $nodeContact->addChild('PersonName', $shipperContactPersonName);
+            $nodeContact->addChild('PhoneNumber', $shipperContactPhoneNumber);
 
             $xml->addChild('LabelImageFormat', 'PDF', '');
 
             $request = $xml->asXML();
-            if ($request && !(mb_detect_encoding($request) == 'UTF-8')) {
-                $request = utf8_encode($request);
+            if ($request && !(mb_detect_encoding($request) == 'UTF-8'))
+            {
+                $request = mb_convert_encoding($request, 'UTF-8');
             }
 
             $responseBody = $this->_getCachedQuotes($request);
-            if ($responseBody === null) {
+            if ($responseBody === null)
+            {
                 $debugData = ['request' => $this->filterDebugData($request)];
-                try {
-                    $response = $this->httpClient->request(
+                try
+                {
+                    $response = $this->getHttpClient()->request(
                         new Request(
                             $this->getGatewayURL(),
                             Request::METHOD_POST,
@@ -550,15 +623,18 @@
                             $request
                         )
                     );
-                    $responseBody = utf8_decode($response->get()->getBody());
+                    $responseBody = mb_convert_encoding($response->get()->getBody(), 'ISO-8859-1', 'UTF-8');
                     $debugData['result'] = $this->filterDebugData($responseBody);
                     $this->_setCachedQuotes($request, $responseBody);
-                } catch (\Exception $e) {
+                }
+                catch (Exception $e)
+                {
                     $this->_errors[$e->getCode()] = $e->getMessage();
                     $responseBody = '';
                 }
                 $this->_debug($debugData);
             }
+
             $this->_isShippingLabelFlag = true;
 
             return $this->_parseResponse($responseBody);
@@ -574,36 +650,41 @@
         {
             usort(
                 $responsesData,
-                function (array $a, array $b): int {
+                function (array $a, array $b): int
+                {
                     return $a['date'] <=> $b['date'];
                 }
             );
+
             /** @var string $lastResponse */
             $lastResponse = '';
             //Processing different dates
-            foreach ($responsesData as $responseData) {
+            foreach ($responsesData as $responseData)
+            {
                 $debugPoint = [];
                 $debugPoint['request'] = $this->filterDebugData($responseData['request']);
                 $debugPoint['response'] = $this->filterDebugData($responseData['body']);
                 $debugPoint['from_cache'] = $responseData['from_cache'];
                 $unavailable = false;
-                try {
+                try
+                {
                     //Getting availability
-                    $bodyXml = $this->_xmlElFactory->create(['data' => $responseData['body']]);
+                    $bodyXml = $this->getXmlElFactory()->create(['data' => $responseData['body']]);
                     $code = $bodyXml->xpath('//GetQuoteResponse/Note/Condition/ConditionCode');
-                    if (isset($code[0]) && (int)$code[0] == self::CONDITION_CODE_SERVICE_DATE_UNAVAILABLE) {
-                        $debugPoint['info'] = sprintf(
-                            __("DHL service is not available at %s date"),
-                            $responseData['date']
-                        );
+                    if (isset($code[0]) && (int)$code[0] == self::CONDITION_CODE_SERVICE_DATE_UNAVAILABLE)
+                    {
+                        $debugPoint['info'] = sprintf(__("DHL service is not available at %s date")->render(), $responseData['date']);
                         $unavailable = true;
                     }
-                } catch (\Throwable $exception) {
+                }
+                catch (Throwable $exception)
+                {
                     //Failed to read response
                     $unavailable = true;
                     $this->_errors[$exception->getCode()] = $exception->getMessage();
                 }
-                if ($unavailable) {
+                if ($unavailable)
+                {
                     //Cannot get rates.
                     $this->_debug($debugPoint);
                     break;
@@ -625,9 +706,8 @@
          */
         private function buildMessageTimestamp(string $datetime = null): string
         {
-            return $this->_coreDate->date(\DATE_RFC3339, $datetime);
+            return $this->getCoreDate()->date(\DATE_RFC3339, $datetime);
         }
-
 
         /**
          * buildMessageReference() override
@@ -636,14 +716,11 @@
          */
         private function buildMessageReference(string $servicePrefix): string
         {
-            $validPrefixes = [
-                self::SERVICE_PREFIX_QUOTE,
-                self::SERVICE_PREFIX_SHIPVAL,
-                self::SERVICE_PREFIX_TRACKING
-            ];
+            $validPrefixes = [self::SERVICE_PREFIX_QUOTE, self::SERVICE_PREFIX_SHIPVAL, self::SERVICE_PREFIX_TRACKING];
 
-            if (!in_array($servicePrefix, $validPrefixes)) {
-                throw new \Magento\Framework\Exception\LocalizedException(
+            if (!in_array($servicePrefix, $validPrefixes))
+            {
+                throw new LocalizedException(
                     __("Invalid service prefix \"$servicePrefix\" provided while attempting to build MessageReference")
                 );
             }
@@ -658,17 +735,17 @@
          */
         private function getGatewayURL(): string
         {
-            if ($this->getConfigData('sandbox_mode')) {
-                return (string)$this->getConfigData('sandbox_url');
-            } else {
-                return (string)$this->getConfigData('gateway_url');
-            }
+            return (string) $this->getConfigData(((bool) $this->getConfigData('sandbox_mode')) ? 'sandbox_url' : 'gateway_url');
         }
 
         /**
-         * THOMAS - EDIT - ΠΡΟΣΘΗΚΗ ΣΥΝΑΡΤΗΣΗΣ: ΑΡΧΗ
-         *
+         * THOMAS - EDIT - ΠΡΟΣΘΗΚΗ ΣΥΝΑΡΤΗΣΕΩΝ: ΑΡΧΗ
+         */
+
+        /*
          * Gets Duty Payment Type
+         *
+         * @access protected
          *
          * @return string
          */
@@ -676,8 +753,134 @@
         {
             return (string)$this->getConfigData('duty_payment_type');
         }
+
         /**
-         * THOMAS - EDIT - ΠΡΟΣΘΗΚΗ ΣΥΝΑΡΤΗΣΗΣ: ΤΕΛΟΣ
+         * Gets Store Manager
+         *
+         * @access protected
+         *
+         * @return \Magento\Store\Model\StoreManagerInterface
+         */
+        protected function getStoreManager(): StoreManagerInterface
+        {
+            return $this->_storeManager;
+        }
+
+        /**
+         * Gets Request
+         *
+         * @access protected
+         *
+         * @return \Magento\Quote\Model\Quote\Address\RateRequest
+         */
+        protected function getRequest(): RateRequest
+        {
+            return $this->_request;
+        }
+
+        /**
+         * Gets Logger
+         *
+         * @access protected
+         *
+         * @return \Psr\Log\LoggerInterface
+         */
+        protected function getLogger(): LoggerInterface
+        {
+            return $this->_logger;
+        }
+
+        /**
+         * Gets String Utils
+         *
+         * @access protected
+         *
+         * @return \Magento\Framework\Stdlib\StringUtils
+         */
+        protected function getStringUtils(): StringUtils
+        {
+            return $this->string;
+        }
+
+        /**
+         * Http Client property
+         *
+         * @access private
+         *
+         * @var \Magento\Framework\HTTP\AsyncClientInterface
+         */
+        private $_httpClient;
+
+        /**
+         * Gets Http Client
+         *
+         * @access protected
+         *
+         * @return \Magento\Framework\HTTP\AsyncClientInterface
+         */
+        protected function getHttpClient(): AsyncClientInterface
+        {
+            return $this->_httpClient;
+        }
+
+        /**
+         * Gets Xml El Factory
+         *
+         * @access protected
+         *
+         * @return \Magento\Shipping\Model\Simplexml\ElementFactory
+         */
+        protected function getXmlElFactory(): ElementFactory
+        {
+            return $this->_xmlElFactory;
+        }
+
+        /**
+         * Proxy Defered Factory property
+         *
+         * @access private
+         *
+         * @var \Magento\Shipping\Model\Rate\Result\ProxyDeferredFactory $_proxyDeferredFactory
+         */
+        private $_proxyDeferredFactory;
+
+        /**
+         * Gets Proxy Defered Factory
+         *
+         * @access private
+         *
+         * @var \Magento\Shipping\Model\Rate\Result\ProxyDeferredFactory
+         */
+        protected function getProxyDeferredFactory(): ProxyDeferredFactory
+        {
+            return $this->_proxyDeferredFactory;
+        }
+
+        /**
+         * Gets Scope Config
+         *
+         * @access private
+         *
+         * @var \Magento\Framework\App\Config\ScopeConfigInterface
+         */
+        protected function getScopeConfig(): ScopeConfigInterface
+        {
+            return $this->_scopeConfig;
+        }
+
+        /**
+         * Gets Core Date
+         *
+         * @access protected
+         *
+         * @var \Magento\Framework\Stdlib\DateTime\DateTime
+         */
+        protected function getCoreDate(): DateTime
+        {
+            return $this->_coreDate;
+        }
+        /**
+         * THOMAS - EDIT - ΠΡΟΣΘΗΚΗ ΣΥΝΑΡΤΗΣΕΩΝ: ΤΕΛΟΣ
          */
     }
 ?>
